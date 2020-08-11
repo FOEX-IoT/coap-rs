@@ -92,6 +92,7 @@ pub use self::server::{Server, CoAPServer};
 pub mod message;
 pub mod client;
 pub mod server;
+pub mod udp;
 mod observer;
 
 

@@ -1,5 +1,6 @@
 use std::io::{Error, ErrorKind, Result};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use crate::udp::UDPWrapper;
 use std::time::Duration;
 use std::thread;
 use std::sync::mpsc;
@@ -10,6 +11,11 @@ use super::message::response::{CoAPResponse, Status};
 use super::message::request::CoAPRequest;
 use super::message::IsMessage;
 use regex::Regex;
+use openssl::ssl::{SslConnector, SslMethod, SslStream};
+use std::io::{Read, Write};
+
+const KEY: &'static str = "1234";
+const ID: &'static str = "CoaP";
 
 const DEFAULT_RECEIVE_TIMEOUT: u64 = 1; // 1s
 
@@ -18,7 +24,7 @@ enum ObserveMessage {
 }
 
 pub struct CoAPClient {
-    socket: UdpSocket,
+    socket: SslStream<UDPWrapper>,
     peer_addr: SocketAddr,
     observe_sender: Option<mpsc::Sender<ObserveMessage>>,
     observe_thread: Option<thread::JoinHandle<()>>,
@@ -33,11 +39,22 @@ impl CoAPClient {
         peer_addr
             .to_socket_addrs()
             .and_then(|mut iter| match iter.next() {
-                Some(paddr) => UdpSocket::bind(bind_addr).and_then(|s| {
+                Some(paddr) => UDPWrapper::connect(&peer_addr.to_socket_addrs().unwrap().next().unwrap()).and_then(|s| {
                     s.set_read_timeout(Some(Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0)))
                         .and_then(|_| {
+                            let mut builder = SslConnector::builder(SslMethod::dtls()).unwrap();
+                            builder.set_psk_client_callback(move |_ssl, _hint, mut identity_buffer, mut psk_buffer| {
+                                identity_buffer.write_all(ID.as_bytes()).unwrap();
+                                psk_buffer.write_all(KEY.as_bytes()).unwrap();
+                                Ok(KEY.len())
+                            });
+
+                            let connector = builder.build();
+
+                            let stream = connector.connect("localhost", s).unwrap();
+
                             Ok(CoAPClient {
-                                socket: s,
+                                socket: stream,
                                 peer_addr: paddr,
                                 observe_sender: None,
                                 observe_thread: None,
@@ -70,7 +87,7 @@ impl CoAPClient {
         let mut packet = CoAPRequest::new();
         packet.set_path(path.as_str());
 
-        let client = Self::new((domain.as_str(), port))?;
+        let mut client = Self::new((domain.as_str(), port))?;
         client.send(&packet)?;
 
         client.set_receive_timeout(Some(timeout))?;
@@ -100,16 +117,26 @@ impl CoAPClient {
         handler(response.message);
 
         let socket;
-        match self.socket.try_clone() {
+        match self.socket.get_ref().try_clone() {
             Ok(good_socket) => socket = good_socket,
             Err(_) => return Err(Error::new(ErrorKind::Other, "network error")),
         }
+
+        let mut builder = SslConnector::builder(SslMethod::dtls()).unwrap();
+        builder.set_psk_client_callback(move |_ssl, _hint, mut identity_buffer, mut psk_buffer| {
+            identity_buffer.write_all(ID.as_bytes()).unwrap();
+            psk_buffer.write_all(KEY.as_bytes()).unwrap();
+            Ok(KEY.len())
+        });
+
+        let connector = builder.build();
+        let mut stream = connector.connect("localhost", socket).unwrap();
         let peer_addr = self.peer_addr.clone();
         let (observe_sender, observe_receiver) = mpsc::channel();
         let observe_path = String::from(resource_path);
 
         let observe_thread = thread::spawn(move || loop {
-            match Self::receive_from_socket(&socket) {
+            match Self::receive_from_socket(&mut stream) {
                 Ok(packet) => {
                     let receive_packet = CoAPRequest::from_packet(packet, &peer_addr);
 
@@ -121,7 +148,7 @@ impl CoAPClient {
                         packet.header.set_message_id(response.message.header.get_message_id());
                         packet.set_token(response.message.get_token().clone());
 
-                        match Self::send_with_socket(&socket, &peer_addr, &packet) {
+                        match Self::send_with_socket(&mut stream, &peer_addr, &packet) {
                             Ok(_) => (),
                             Err(e) => {
                                 warn!("reply ack failed {}", e)
@@ -144,104 +171,104 @@ impl CoAPClient {
                     deregister_packet.set_observe(vec![ObserveOption::Deregister as u8]);
                     deregister_packet.set_path(observe_path.as_str());
 
-                    Self::send_with_socket(&socket, &peer_addr, &deregister_packet.message).unwrap();
-                    Self::receive_from_socket(&socket).unwrap();
-                    break;
-                },
-                _ => continue,
-            }
-        });
-        self.observe_sender = Some(observe_sender);
-        self.observe_thread = Some(observe_thread);
-
-        return Ok(());
-    }
-
-    /// Stop observing
-    pub fn unobserve(&mut self) {
-        match self.observe_sender.take() {
-            Some(ref sender) => {
-                sender.send(ObserveMessage::Terminate).unwrap();
-
-                self.observe_thread.take().map(|g| g.join().unwrap());
-            }
-            _ => {}
+                    Self::send_with_socket(&mut stream, &peer_addr, &deregister_packet.message).unwrap();
+                    Self::receive_from_socket(&mut stream).unwrap();
+                break;
+            },
+            _ => continue,
         }
-    }
+    });
+    self.observe_sender = Some(observe_sender);
+    self.observe_thread = Some(observe_thread);
 
-    /// Execute a request.
-    pub fn send(&self, request: &CoAPRequest) -> Result<()> {
-        Self::send_with_socket(&self.socket, &self.peer_addr, &request.message)
-    }
+    return Ok(());
+}
 
-    /// Receive a response.
-    pub fn receive(&self) -> Result<CoAPResponse> {
-        let packet = Self::receive_from_socket(&self.socket)?;
-        Ok(CoAPResponse { message: packet })
-    }
+/// Stop observing
+pub fn unobserve(&mut self) {
+    match self.observe_sender.take() {
+        Some(ref sender) => {
+            sender.send(ObserveMessage::Terminate).unwrap();
 
-    /// Set the receive timeout.
-    pub fn set_receive_timeout(&self, dur: Option<Duration>) -> Result<()> {
-        self.socket.set_read_timeout(dur)
-    }
-
-    fn send_with_socket(socket: &UdpSocket, peer_addr: &SocketAddr, message: &Packet) -> Result<()> {
-        match message.to_bytes() {
-            Ok(bytes) => {
-                let size = socket.send_to(&bytes[..], peer_addr)?;
-                if size == bytes.len() {
-                    Ok(())
-                } else {
-                    Err(Error::new(ErrorKind::Other, "send length error"))
-                }
-            }
-            Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
+            self.observe_thread.take().map(|g| g.join().unwrap());
         }
-    }
-
-    fn receive_from_socket(socket: &UdpSocket) -> Result<Packet> {
-        let mut buf = [0; 1500];
-
-        let (nread, _src) = socket.recv_from(&mut buf)?;
-        match Packet::from_bytes(&buf[..nread]) {
-            Ok(packet) => Ok(packet),
-            Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
-        }
-    }
-
-    fn parse_coap_url(url: &str) -> Result<(String, u16, String)> {
-        let url_params = match Url::parse(url) {
-            Ok(url_params) => url_params,
-            Err(_) => return Err(Error::new(ErrorKind::InvalidInput, "url error")),
-        };
-
-        let host = match url_params.host_str() {
-            Some("") => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
-            Some(h) => h,
-            None => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
-        };
-        let host = Regex::new(r"^\[(.*?)]$").unwrap().replace(&host, "$1").to_string();
-
-        let port = match url_params.port() {
-            Some(p) => p,
-            None => 5683,
-        };
-
-        let path = url_params.path().to_string();
-
-        return Ok((host.to_string(), port, path));
-    }
-
-    fn gen_message_id(message_id: &mut u16) -> u16 {
-        (*message_id) += 1;
-        return *message_id;
+        _ => {}
     }
 }
 
-impl Drop for CoAPClient {
-    fn drop(&mut self) {
-        self.unobserve();
+/// Execute a request.
+pub fn send(&mut self, request: &CoAPRequest) -> Result<()> {
+    Self::send_with_socket(&mut self.socket, &self.peer_addr, &request.message)
+}
+
+/// Receive a response.
+pub fn receive(&mut self) -> Result<CoAPResponse> {
+    let packet = Self::receive_from_socket(&mut self.socket)?;
+    Ok(CoAPResponse { message: packet })
+}
+
+/// Set the receive timeout.
+pub fn set_receive_timeout(&self, dur: Option<Duration>) -> Result<()> {
+    self.socket.get_ref().set_read_timeout(dur)
+}
+
+fn send_with_socket(socket: &mut SslStream<UDPWrapper>, peer_addr: &SocketAddr, message: &Packet) -> Result<()> {
+    match message.to_bytes() {
+        Ok(bytes) => {
+            let size = socket.ssl_write(&bytes[..]).unwrap();
+            if size == bytes.len() {
+                Ok(())
+            } else {
+                Err(Error::new(ErrorKind::Other, "send length error"))
+            }
+        }
+        Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
     }
+}
+
+fn receive_from_socket(socket: &mut SslStream<UDPWrapper>) -> Result<Packet> {
+    let mut buf = [0; 1500];
+
+    let nread = socket.ssl_read(&mut buf).unwrap();
+    match Packet::from_bytes(&buf[..nread]) {
+        Ok(packet) => Ok(packet),
+        Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
+    }
+}
+
+fn parse_coap_url(url: &str) -> Result<(String, u16, String)> {
+    let url_params = match Url::parse(url) {
+        Ok(url_params) => url_params,
+        Err(_) => return Err(Error::new(ErrorKind::InvalidInput, "url error")),
+    };
+
+    let host = match url_params.host_str() {
+        Some("") => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
+        Some(h) => h,
+        None => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
+    };
+    let host = Regex::new(r"^\[(.*?)]$").unwrap().replace(&host, "$1").to_string();
+
+    let port = match url_params.port() {
+        Some(p) => p,
+        None => 5683,
+    };
+
+    let path = url_params.path().to_string();
+
+    return Ok((host.to_string(), port, path));
+}
+
+fn gen_message_id(message_id: &mut u16) -> u16 {
+    (*message_id) += 1;
+    return *message_id;
+}
+}
+
+impl Drop for CoAPClient {
+fn drop(&mut self) {
+    self.unobserve();
+}
 }
 
 #[cfg(test)]
