@@ -33,36 +33,35 @@ pub struct CoAPClient {
 impl CoAPClient {
     /// Create a CoAP client with the specific source and peer address.
     pub fn new_with_specific_source<A: ToSocketAddrs, B: ToSocketAddrs>(
-        bind_addr: A,
+        _bind_addr: A,
         peer_addr: B,
     ) -> Result<CoAPClient> {
-        peer_addr
-            .to_socket_addrs()
-            .and_then(|mut iter| match iter.next() {
-                Some(paddr) => UDPWrapper::connect(&peer_addr.to_socket_addrs().unwrap().next().unwrap()).and_then(|s| {
-                    s.set_read_timeout(Some(Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0)))
-                        .and_then(|_| {
-                            let mut builder = SslConnector::builder(SslMethod::dtls()).unwrap();
-                            builder.set_psk_client_callback(move |_ssl, _hint, mut identity_buffer, mut psk_buffer| {
-                                identity_buffer.write_all(ID.as_bytes()).unwrap();
-                                psk_buffer.write_all(KEY.as_bytes()).unwrap();
-                                Ok(KEY.len())
-                            });
+        let addr = peer_addr
+            .to_socket_addrs()?
+            .next().ok_or(Error::new(ErrorKind::Other, "no address"))?;
 
-                            let connector = builder.build();
+        let socket:UDPWrapper = UDPWrapper::connect(&addr)?;
 
-                            let stream = connector.connect("localhost", s).unwrap();
+        socket.set_read_timeout(Some(Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0)))?;
 
-                            Ok(CoAPClient {
-                                socket: stream,
-                                peer_addr: paddr,
-                                observe_sender: None,
-                                observe_thread: None,
-                            })
-                        })
-                }),
-                None => Err(Error::new(ErrorKind::Other, "no address")),
-            })
+        let mut builder = SslConnector::builder(SslMethod::dtls())?;
+
+        builder.set_psk_client_callback(move |_ssl, _hint, mut identity_buffer, mut psk_buffer| {
+            identity_buffer.write_all(ID.as_bytes()).unwrap();
+            psk_buffer.write_all(KEY.as_bytes()).unwrap();
+            Ok(KEY.len())
+        });
+
+        let connector = builder.build();
+
+        let stream = connector.connect("localhost", socket).unwrap();
+
+        Ok(CoAPClient {
+            socket: stream,
+            peer_addr: addr,
+            observe_sender: None,
+            observe_thread: None,
+        })
     }
 
     /// Create a CoAP client with the peer address.
