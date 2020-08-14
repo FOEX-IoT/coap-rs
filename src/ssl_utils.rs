@@ -2,8 +2,8 @@ use openssl::ssl::{SslConnector, SslMethod};
 use std::io::Result;
 use std::io::Write;
 
-const KEY: &'static str = "<placeholder>";
-const ID: &'static str = "Client_identity";
+const KEY: &'static str = "<either gateway code or key through authentification>";
+const ID: &'static str = "Client_identity"; // or the user you created through authentification
 
 pub fn get_ssl_connector() -> Result<SslConnector> {
   let mut builder = SslConnector::builder(SslMethod::dtls())?;
