@@ -91,9 +91,8 @@ pub use self::observer::Observer;
 pub use self::server::{Server, CoAPServer};
 pub mod message;
 pub mod client;
+pub mod dtls_client;
 pub mod server;
 pub mod udp;
 mod observer;
-
-
-
+mod ssl_utils;

@@ -9,21 +9,7 @@ impl UDPWrapper {
     pub fn new(udp: UdpSocket) -> Self {
         UDPWrapper(udp)
     }
-    pub fn connect(address: &SocketAddr) -> Result<Self> {
-        #[inline]
-        fn inaddr_any() -> IpAddr {
-            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
-        }
-
-        #[inline]
-        fn in6addr_any() -> IpAddr {
-            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0))
-        }
-
-        let bind_address = match address {
-            SocketAddr::V4(_) => SocketAddr::new(inaddr_any(), 0),
-            SocketAddr::V6(_) => SocketAddr::new(in6addr_any(), 0),
-        };
+    pub fn connect(address: &SocketAddr, bind_address: &SocketAddr) -> Result<Self> {
         let socket = UdpSocket::bind(&bind_address)?;
         socket.connect(address)?;
         Ok(UDPWrapper(socket))
