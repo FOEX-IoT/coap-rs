@@ -25,6 +25,8 @@ pub struct DTLSCoAPClient {
   peer_addr: SocketAddr,
   observe_sender: Option<mpsc::Sender<ObserveMessage>>,
   observe_thread: Option<thread::JoinHandle<()>>,
+  key: String,
+  id: String,
 }
 
 impl DTLSCoAPClient {
@@ -32,6 +34,8 @@ impl DTLSCoAPClient {
   pub fn new_with_specific_source<A: ToSocketAddrs, B: ToSocketAddrs>(
     bind_addr: A,
     peer_addr: B,
+    key: String,
+    id: String,
   ) -> Result<DTLSCoAPClient> {
     let addr = peer_addr
       .to_socket_addrs()?
@@ -47,7 +51,7 @@ impl DTLSCoAPClient {
 
     socket.set_read_timeout(Some(Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0)))?;
 
-    let connector = get_ssl_connector()?;
+    let connector = get_ssl_connector(key.clone(), id.clone())?;
 
     let stream = connector.connect("localhost", socket).unwrap();
 
@@ -56,33 +60,35 @@ impl DTLSCoAPClient {
       peer_addr: addr,
       observe_sender: None,
       observe_thread: None,
+      key,
+      id
     })
   }
 
   /// Create a CoAP client with the peer address.
-  pub fn new<A: ToSocketAddrs>(addr: A) -> Result<DTLSCoAPClient> {
+  pub fn new<A: ToSocketAddrs>(addr: A, key: String, id: String) -> Result<DTLSCoAPClient> {
     addr
       .to_socket_addrs()
       .and_then(|mut iter| match iter.next() {
-        Some(SocketAddr::V4(_)) => Self::new_with_specific_source("0.0.0.0:0", addr),
-        Some(SocketAddr::V6(_)) => Self::new_with_specific_source(":::0", addr),
+        Some(SocketAddr::V4(_)) => Self::new_with_specific_source("0.0.0.0:0", addr, key, id),
+        Some(SocketAddr::V6(_)) => Self::new_with_specific_source(":::0", addr, key, id),
         None => Err(Error::new(ErrorKind::Other, "no address")),
       })
   }
 
   /// Execute a get request
-  pub fn get(url: &str) -> Result<CoAPResponse> {
-    Self::get_with_timeout(url, Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0))
+  pub fn get(url: &str, key: String, id: String) -> Result<CoAPResponse> {
+    Self::get_with_timeout(url, Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0), key, id)
   }
 
   /// Execute a get request with the coap url and a specific timeout.
-  pub fn get_with_timeout(url: &str, timeout: Duration) -> Result<CoAPResponse> {
+  pub fn get_with_timeout(url: &str, timeout: Duration, key: String, id: String,) -> Result<CoAPResponse> {
     let (domain, port, path) = Self::parse_coap_url(url)?;
 
     let mut packet = CoAPRequest::new();
     packet.set_path(path.as_str());
 
-    let mut client = Self::new((domain.as_str(), port))?;
+    let mut client = Self::new((domain.as_str(), port), key, id)?;
     client.send(&packet)?;
 
     client.set_receive_timeout(Some(timeout))?;
@@ -121,7 +127,7 @@ impl DTLSCoAPClient {
       Err(_) => return Err(Error::new(ErrorKind::Other, "network error")),
     }
 
-    let connector = get_ssl_connector()?;
+    let connector = get_ssl_connector(self.key.clone(), self.id.clone())?;
 
     let mut stream = connector.connect("localhost", socket).unwrap();
     let peer_addr = self.peer_addr.clone();
@@ -302,27 +308,5 @@ mod test {
 
   async fn request_handler(_: CoAPRequest) -> Option<CoAPResponse> {
     None
-  }
-
-  #[test]
-  fn test_get() {
-    let resp = DTLSCoAPClient::get("coap://coap.me:5683/hello").unwrap();
-    assert_eq!(resp.message.payload, b"world".to_vec());
-  }
-
-  #[test]
-  fn test_get_timeout() {
-    let server_port = server::test::spawn_server(request_handler).recv().unwrap();
-
-    let error = DTLSCoAPClient::get_with_timeout(
-      &format!("coap://127.0.0.1:{}/Rust", server_port),
-      Duration::new(1, 0),
-    )
-    .unwrap_err();
-    if cfg!(windows) {
-      assert_eq!(error.kind(), ErrorKind::TimedOut);
-    } else {
-      assert_eq!(error.kind(), ErrorKind::WouldBlock);
-    }
   }
 }
