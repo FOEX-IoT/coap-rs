@@ -7,11 +7,13 @@ lazy_static! {
     static ref KEY: String = {
         dotenv::dotenv().ok();
         let key = std::env::var("COAP_KEY").expect("COAP_KEY must be set!");
+        println!("key is {}", key);
         key
     };
     static ref ID: String = {
         dotenv::dotenv().ok();
         let id = std::env::var("COAP_ID").expect("COAP_ID must be set!");
+        println!("id is {}", id);
         id
     };
 }

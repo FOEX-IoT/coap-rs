@@ -71,12 +71,12 @@ impl DTLSCoAPClient {
   }
 
   /// Execute a get request
-  pub fn get(url: &str, key: String, id: String) -> Result<CoAPResponse> {
-    Self::get_with_timeout(url, Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0), key, id)
+  pub fn get(url: &str) -> Result<CoAPResponse> {
+    Self::get_with_timeout(url, Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0))
   }
 
   /// Execute a get request with the coap url and a specific timeout.
-  pub fn get_with_timeout(url: &str, timeout: Duration, key: String, id: String,) -> Result<CoAPResponse> {
+  pub fn get_with_timeout(url: &str, timeout: Duration) -> Result<CoAPResponse> {
     let (domain, port, path) = Self::parse_coap_url(url)?;
 
     let mut packet = CoAPRequest::new();
@@ -92,6 +92,85 @@ impl DTLSCoAPClient {
     }
   }
 
+
+  /// Execute a request.
+  pub fn send(&mut self, request: &CoAPRequest) -> Result<()> {
+    Self::send_with_socket(&mut self.socket, &self.peer_addr, &request.message)
+  }
+
+  /// Receive a response.
+  pub fn receive(&mut self) -> Result<CoAPResponse> {
+    let packet = Self::receive_from_socket(&mut self.socket)?;
+    Ok(CoAPResponse { message: packet })
+  }
+
+  /// Set the receive timeout.
+  pub fn set_receive_timeout(&self, dur: Option<Duration>) -> Result<()> {
+    self.socket.get_ref().set_read_timeout(dur)
+  }
+
+  fn send_with_socket(
+    socket: &mut SslStream<UDPWrapper>,
+    peer_addr: &SocketAddr,
+    message: &Packet,
+  ) -> Result<()> {
+    match message.to_bytes() {
+      Ok(bytes) => {
+        let size = socket.ssl_write(&bytes[..]).unwrap();
+        if size == bytes.len() {
+          Ok(())
+        } else {
+          Err(Error::new(ErrorKind::Other, "send length error"))
+        }
+      }
+      Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
+    }
+  }
+
+  fn receive_from_socket(socket: &mut SslStream<UDPWrapper>) -> Result<Packet> {
+    let mut buf = [0; 1500];
+
+    let nread = socket.ssl_read(&mut buf);
+    if nread.is_err() {
+      return Err(Error::new(ErrorKind::InvalidInput, "packet error"));
+    }
+    let nread = nread.unwrap();
+    match Packet::from_bytes(&buf[..nread]) {
+      Ok(packet) => Ok(packet),
+      Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
+    }
+  }
+
+  fn parse_coap_url(url: &str) -> Result<(String, u16, String)> {
+    let url_params = match Url::parse(url) {
+      Ok(url_params) => url_params,
+      Err(_) => return Err(Error::new(ErrorKind::InvalidInput, "url error")),
+    };
+
+    let host = match url_params.host_str() {
+      Some("") => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
+      Some(h) => h,
+      None => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
+    };
+    let host = Regex::new(r"^\[(.*?)]$")
+      .unwrap()
+      .replace(&host, "$1")
+      .to_string();
+
+    let port = match url_params.port() {
+      Some(p) => p,
+      None => 5683,
+    };
+
+    let path = url_params.path().to_string();
+
+    return Ok((host.to_string(), port, path));
+  }
+
+  fn gen_message_id(message_id: &mut u16) -> u16 {
+    (*message_id) += 1;
+    return *message_id;
+  }
   /// Observe a resource with the handler
   pub fn observe<H: FnMut(Packet) + Send + 'static>(
     &mut self,
@@ -187,85 +266,6 @@ impl DTLSCoAPClient {
       }
       _ => {}
     }
-  }
-
-  /// Execute a request.
-  pub fn send(&mut self, request: &CoAPRequest) -> Result<()> {
-    Self::send_with_socket(&mut self.socket, &self.peer_addr, &request.message)
-  }
-
-  /// Receive a response.
-  pub fn receive(&mut self) -> Result<CoAPResponse> {
-    let packet = Self::receive_from_socket(&mut self.socket)?;
-    Ok(CoAPResponse { message: packet })
-  }
-
-  /// Set the receive timeout.
-  pub fn set_receive_timeout(&self, dur: Option<Duration>) -> Result<()> {
-    self.socket.get_ref().set_read_timeout(dur)
-  }
-
-  fn send_with_socket(
-    socket: &mut SslStream<UDPWrapper>,
-    peer_addr: &SocketAddr,
-    message: &Packet,
-  ) -> Result<()> {
-    match message.to_bytes() {
-      Ok(bytes) => {
-        let size = socket.ssl_write(&bytes[..]).unwrap();
-        if size == bytes.len() {
-          Ok(())
-        } else {
-          Err(Error::new(ErrorKind::Other, "send length error"))
-        }
-      }
-      Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
-    }
-  }
-
-  fn receive_from_socket(socket: &mut SslStream<UDPWrapper>) -> Result<Packet> {
-    let mut buf = [0; 1500];
-
-    let nread = socket.ssl_read(&mut buf);
-    if nread.is_err() {
-      return Err(Error::new(ErrorKind::InvalidInput, "packet error"));
-    }
-    let nread = nread.unwrap();
-    match Packet::from_bytes(&buf[..nread]) {
-      Ok(packet) => Ok(packet),
-      Err(_) => Err(Error::new(ErrorKind::InvalidInput, "packet error")),
-    }
-  }
-
-  fn parse_coap_url(url: &str) -> Result<(String, u16, String)> {
-    let url_params = match Url::parse(url) {
-      Ok(url_params) => url_params,
-      Err(_) => return Err(Error::new(ErrorKind::InvalidInput, "url error")),
-    };
-
-    let host = match url_params.host_str() {
-      Some("") => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
-      Some(h) => h,
-      None => return Err(Error::new(ErrorKind::InvalidInput, "host error")),
-    };
-    let host = Regex::new(r"^\[(.*?)]$")
-      .unwrap()
-      .replace(&host, "$1")
-      .to_string();
-
-    let port = match url_params.port() {
-      Some(p) => p,
-      None => 5683,
-    };
-
-    let path = url_params.path().to_string();
-
-    return Ok((host.to_string(), port, path));
-  }
-
-  fn gen_message_id(message_id: &mut u16) -> u16 {
-    (*message_id) += 1;
-    return *message_id;
   }
 }
 
