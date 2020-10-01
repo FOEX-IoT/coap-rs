@@ -25,8 +25,6 @@ pub struct DTLSCoAPClient {
   peer_addr: SocketAddr,
   observe_sender: Option<mpsc::Sender<ObserveMessage>>,
   observe_thread: Option<thread::JoinHandle<()>>,
-  key: String,
-  id: String,
 }
 
 impl DTLSCoAPClient {
@@ -34,8 +32,6 @@ impl DTLSCoAPClient {
   pub fn new_with_specific_source<A: ToSocketAddrs, B: ToSocketAddrs>(
     bind_addr: A,
     peer_addr: B,
-    key: String,
-    id: String,
   ) -> Result<DTLSCoAPClient> {
     let addr = peer_addr
       .to_socket_addrs()?
@@ -51,7 +47,7 @@ impl DTLSCoAPClient {
 
     socket.set_read_timeout(Some(Duration::new(DEFAULT_RECEIVE_TIMEOUT, 0)))?;
 
-    let connector = get_ssl_connector(key.clone(), id.clone())?;
+    let connector = get_ssl_connector()?;
 
     let stream = connector.connect("localhost", socket).unwrap();
 
@@ -60,18 +56,16 @@ impl DTLSCoAPClient {
       peer_addr: addr,
       observe_sender: None,
       observe_thread: None,
-      key,
-      id
     })
   }
 
   /// Create a CoAP client with the peer address.
-  pub fn new<A: ToSocketAddrs>(addr: A, key: String, id: String) -> Result<DTLSCoAPClient> {
+  pub fn new<A: ToSocketAddrs>(addr: A) -> Result<DTLSCoAPClient> {
     addr
       .to_socket_addrs()
       .and_then(|mut iter| match iter.next() {
-        Some(SocketAddr::V4(_)) => Self::new_with_specific_source("0.0.0.0:0", addr, key, id),
-        Some(SocketAddr::V6(_)) => Self::new_with_specific_source(":::0", addr, key, id),
+        Some(SocketAddr::V4(_)) => Self::new_with_specific_source("0.0.0.0:0", addr),
+        Some(SocketAddr::V6(_)) => Self::new_with_specific_source(":::0", addr),
         None => Err(Error::new(ErrorKind::Other, "no address")),
       })
   }
@@ -88,7 +82,7 @@ impl DTLSCoAPClient {
     let mut packet = CoAPRequest::new();
     packet.set_path(path.as_str());
 
-    let mut client = Self::new((domain.as_str(), port), key, id)?;
+    let mut client = Self::new((domain.as_str(), port))?;
     client.send(&packet)?;
 
     client.set_receive_timeout(Some(timeout))?;
@@ -127,7 +121,7 @@ impl DTLSCoAPClient {
       Err(_) => return Err(Error::new(ErrorKind::Other, "network error")),
     }
 
-    let connector = get_ssl_connector(self.key.clone(), self.id.clone())?;
+    let connector = get_ssl_connector()?;
 
     let mut stream = connector.connect("localhost", socket).unwrap();
     let peer_addr = self.peer_addr.clone();
